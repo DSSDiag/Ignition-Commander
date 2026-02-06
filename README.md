@@ -25,36 +25,27 @@ This project allows you to schedule your air compressor's power supply using a *
 
 > **WARNING:** You are working with mains voltage (110V/220V) when connecting the SSR to the compressor. Ensure the compressor is unplugged before working on it. Isolate all high-voltage connections properly.
 
-## Software Setup (Arduino IDE / VS Code)
+## Software Setup (PlatformIO)
 
-### 1. Install ESP32 Board Manager
-1.  Open **Preferences**.
-2.  Add this URL to **Additional Board Manager URLs**:
-    ```
-    https://espressif.github.io/arduino-esp32/package_esp32_index.json
-    ```
-3.  Go to **Tools > Board > Boards Manager**, search for `esp32` (by Espressif Systems), and install it.
+This project uses **PlatformIO**.
 
-### 2. Select Your Board
-*   **Board:** `Seeed XIAO ESP32C3` (or `ESP32C3 Dev Module`).
-*   **USB CDC On Boot:** `Enabled` (Crucial for seeing Serial logs on the C3).
-*   **Partition Scheme:** `RainMaker` (You MUST select this, or the code won't fit).
-    *   *If "RainMaker" is not available, try "Huge App".*
+### 1. Prerequisites
+*   Visual Studio Code
+*   PlatformIO IDE Extension
 
-### 3. Install Libraries
-Go to **Tools > Manage Libraries** and install:
-*   `ESP RainMaker` by Espressif Systems.
-
-### 4. Upload
-1.  Connect your ESP32C3 via USB.
-2.  Select the correct COM port.
-3.  Click **Upload**.
+### 2. Build and Upload
+1.  Open this folder in VS Code.
+2.  Click the PlatformIO Alien icon in the sidebar.
+3.  Under `env:seeed_xiao_esp32c3`, click **Build** to verify.
+4.  Connect your board via USB.
+5.  Click **Upload**.
+6.  Click **Monitor** to see the Serial output and provisioning QR code.
 
 ## Usage Instructions
 
 ### 1. Initial Setup (Provisioning)
 1.  Download the **ESP RainMaker** app (iOS/Android).
-2.  Open the Serial Monitor (Baud 115200) on your computer.
+2.  Open the Serial Monitor.
 3.  Reset the ESP32. You should see a message saying "Provisioning Started".
 4.  Open the RainMaker app and tap **"Add Device"**.
 5.  It should automatically detect the device via Bluetooth (BLE).

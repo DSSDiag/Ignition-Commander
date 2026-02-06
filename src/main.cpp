@@ -1,3 +1,4 @@
+#include <Arduino.h>
 #include "RMaker.h"
 #include "WiFi.h"
 #include "WiFiProv.h"
