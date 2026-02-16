@@ -6,6 +6,7 @@ This project allows you to schedule your air compressor's power supply using a *
 *   **Automated Scheduling:** Set Start and End times.
 *   **Offline Reliability:** The schedule runs locally on the ESP32. It only needs the internet to sync the time (NTP).
 *   **Safety Cutoff:** If the power fails and the device cannot sync the time (no internet), the compressor stays **OFF** to prevent accidents.
+*   **Factory Reset:** Easily reset Wi-Fi provisioning and clear preferences by holding the BOOT button for 3 seconds.
 *   **Google Home Integration:** Control the compressor (On/Off) using Google Assistant.
 *   **App Control:** Use the ESP RainMaker app to change schedules and monitor status.
 
@@ -22,6 +23,7 @@ This project allows you to schedule your air compressor's power supply using a *
 | **D0 (GPIO 2)** | **Control / Signal (+)** |
 | **GND** | **Ground (-)** |
 | **5V / VBUS** | **VCC** (If your SSR needs power) |
+| **D9 (Boot Button)** | **Factory Reset** (Built-in) |
 
 > **WARNING:** You are working with mains voltage (110V/220V) when connecting the SSR to the compressor. Ensure the compressor is unplugged before working on it. Isolate all high-voltage connections properly.
 
@@ -65,6 +67,12 @@ Once added, you will see a "Compressor" device.
 4.  Login with the same account you used in the RainMaker app.
 5.  Your compressor will appear as a Switch!
 
+### 4. Factory Reset
+If you change Wi-Fi networks or encounter issues:
+1.  Press and hold the **BOOT Button (GPIO 9)** on the XIAO ESP32C3 for **3 seconds**.
+2.  Release the button when the Serial Monitor indicates "Factory Reset Triggered" (or verify reset behavior).
+3.  The device will clear its Wi-Fi credentials and reboot into Provisioning Mode.
+
 ## Safety Notes
-*   The device defaults to **OFF** if it cannot determine the current time (e.g., year < 2022).
+*   **Time Validation:** The device defaults to **OFF** if it cannot determine the current time via NTP (e.g., year < 2022). This ensures the compressor doesn't run unexpectedly if the internet is down after a power outage.
 *   Always ensure your SSR is rated for the motor load (Inductive load).

@@ -281,7 +281,7 @@ void resetDevice() {
   prefs.end();
 
   // Factory Reset RainMaker (clears Wi-Fi and Node ID)
-  RMakerFactoryReset(2);
+  RMaker.factoryReset(2);
 }
 
 // -----------------------------------------------------------------------------
