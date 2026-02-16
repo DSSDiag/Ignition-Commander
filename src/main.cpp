@@ -8,12 +8,14 @@
 // -----------------------------------------------------------------------------
 // Configuration
 // -----------------------------------------------------------------------------
-// Seeed XIAO ESP32C3 D0 is GPIO 2
-#define RELAY_PIN    2
 
-// Device Names
-#define DEVICE_NAME  "Compressor"
-#define NODE_NAME    "CompressorNode"
+// Pins
+#define RELAY_PIN       2  // D0 on Seeed XIAO ESP32C3
+#define BOOT_BUTTON_PIN 9  // Built-in BOOT button
+
+// Device Info
+#define DEVICE_NAME     "Compressor"
+#define NODE_NAME       "CompressorNode"
 
 // Default Schedule
 #define DEFAULT_START_HR  8
@@ -25,9 +27,13 @@
 // NTP Server
 const char* ntpServer = "pool.ntp.org";
 
+// Factory Reset Hold Time (ms)
+#define FACTORY_RESET_TIME_MS 3000
+
 // -----------------------------------------------------------------------------
 // Globals
 // -----------------------------------------------------------------------------
+
 // State
 bool relay_state = false;
 
@@ -42,6 +48,9 @@ int timezone_offset = DEFAULT_TZ_OFFSET;
 // RainMaker Objects
 static Switch my_switch(DEVICE_NAME, &relay_state);
 
+// Preferences
+Preferences prefs;
+
 // -----------------------------------------------------------------------------
 // Forward Declarations
 // -----------------------------------------------------------------------------
@@ -50,19 +59,25 @@ void write_callback(Device *device, Param *param, const param_val_t val, void *p
 void setupTime();
 bool isTimeValid(struct tm *timeinfo);
 void checkSchedule();
+void checkFactoryReset();
 void loadSettings();
 void saveSetting(const char* key, int value);
 void saveSetting(const char* key, bool value);
+void resetDevice();
 
 // -----------------------------------------------------------------------------
 // Main Setup
 // -----------------------------------------------------------------------------
 void setup() {
   Serial.begin(115200);
+  delay(1000); // Allow serial to stabilize
+  Serial.println("\n--- Starting Compressor Controller ---");
 
-  // Configure Relay Pin
+  // Configure Pins
   pinMode(RELAY_PIN, OUTPUT);
-  digitalWrite(RELAY_PIN, LOW); // Default Off
+  digitalWrite(RELAY_PIN, LOW); // Default Off (Safety)
+
+  pinMode(BOOT_BUTTON_PIN, INPUT_PULLUP);
 
   // Load Settings from NVS
   loadSettings();
@@ -73,10 +88,10 @@ void setup() {
   Node my_node;
   my_node = RMaker.initNode(NODE_NAME);
 
-  // Initialize Switch Device
+  // Initialize Switch Device with Callback
   my_switch.addCb(write_callback);
 
-  // Add Standard Power Parameter (Already added by Switch constructor, but we ensure it's there)
+  // Note: Standard 'Power' param is added automatically by Switch constructor.
 
   // Add Custom Parameters for Scheduling
   // 1. Enable Schedule
@@ -92,7 +107,7 @@ void setup() {
 
   // 3. Start Time (Minute)
   Param param_start_min("Start Minute", RMakerVal(start_min), PROP_FLAG_READ | PROP_FLAG_WRITE | PROP_FLAG_PERSIST);
-  param_start_min.addBounds(RMakerVal(0), RMakerVal(59), RMakerVal(5)); // Step 5 for easier UI
+  param_start_min.addBounds(RMakerVal(0), RMakerVal(59), RMakerVal(5));
   param_start_min.addUIType(RMAKER_UI_SLIDER);
   my_switch.addParam(param_start_min);
 
@@ -109,7 +124,6 @@ void setup() {
   my_switch.addParam(param_end_min);
 
   // 6. Timezone Offset (Hours from UTC)
-  // Simple integer slider for -12 to +14
   Param param_tz("Timezone Offset", RMakerVal(timezone_offset), PROP_FLAG_READ | PROP_FLAG_WRITE | PROP_FLAG_PERSIST);
   param_tz.addBounds(RMakerVal(-12), RMakerVal(14), RMakerVal(1));
   param_tz.addUIType(RMAKER_UI_SLIDER);
@@ -118,19 +132,19 @@ void setup() {
   // Add Device to Node
   my_node.addDevice(my_switch);
 
-  // Event Handling (Provisioning, Wi-Fi, etc.)
+  // Enable Features
   RMaker.enableOTA(OTA_USING_PARAMS);
-  RMaker.enableTZService(); // Enables standard Timezone service
-  RMaker.enableSchedule();  // Enables RainMaker Cloud Schedules (optional backup)
+  RMaker.enableTZService();
+  RMaker.enableSchedule();
 
   // Start RainMaker
-  Serial.printf("\nStarting RainMaker...");
+  Serial.println("Starting RainMaker...");
   RMaker.start();
 
-  // Setup WiFi Event Listener for Provisioning info
+  // Setup WiFi Event Listener
   WiFi.onEvent(sysProvEvent);
 
-  // Setup NTP
+  // Initial Time Setup
   setupTime();
 }
 
@@ -138,30 +152,36 @@ void setup() {
 // Main Loop
 // -----------------------------------------------------------------------------
 void loop() {
-  // Check the schedule every loop (or you could throttle this to once per second)
+  // Check for Factory Reset Button Press
+  checkFactoryReset();
+
+  // Check Schedule Periodically
   static unsigned long lastCheck = 0;
   if (millis() - lastCheck > 5000) { // Check every 5 seconds
     lastCheck = millis();
     checkSchedule();
   }
 
-  // Allow RainMaker to work
+  // Small delay to prevent watchdog starvation
   delay(100);
 }
 
 // -----------------------------------------------------------------------------
-// Schedule Logic
+// Logic: Schedule & Safety
 // -----------------------------------------------------------------------------
 void checkSchedule() {
   struct tm timeinfo;
 
-  // 1. Get Local Time
+  // 1. Safety: Get Local Time. If fails, turn OFF.
   if (!getLocalTime(&timeinfo)) {
-    Serial.println("Failed to obtain time");
-    // SAFETY: If we don't know the time, and we rely on schedule, what to do?
-    // User requested: "compressor is to be off if the esp does not know time"
+    // Only spam serial if we were previously ON or valid
+    static bool logged_fail = false;
+    if (!logged_fail) {
+      Serial.println("SAFETY WARNING: Failed to obtain time. Ensuring Relay is OFF.");
+      logged_fail = true;
+    }
+
     if (relay_state == true) {
-      Serial.println("SAFETY: Time invalid, turning OFF.");
       relay_state = false;
       digitalWrite(RELAY_PIN, LOW);
       my_switch.updateAndReportParam(ESP_RMAKER_DEF_POWER_NAME, relay_state);
@@ -169,10 +189,15 @@ void checkSchedule() {
     return;
   }
 
-  // 2. Validate Time (Check if year is reasonable, e.g. > 2020)
+  // 2. Safety: Validate Time (Year > 2022). If invalid, turn OFF.
   if (!isTimeValid(&timeinfo)) {
-    Serial.println("Time not synced yet (Year < 2022). Keeping OFF.");
-     if (relay_state == true) {
+    static bool logged_invalid = false;
+    if (!logged_invalid) {
+      Serial.printf("SAFETY WARNING: Time invalid (Year: %d). Ensuring Relay is OFF.\n", timeinfo.tm_year + 1900);
+      logged_invalid = true;
+    }
+
+    if (relay_state == true) {
       relay_state = false;
       digitalWrite(RELAY_PIN, LOW);
       my_switch.updateAndReportParam(ESP_RMAKER_DEF_POWER_NAME, relay_state);
@@ -180,12 +205,12 @@ void checkSchedule() {
     return;
   }
 
-  // 3. Check Schedule
+  // 3. Apply Schedule (if enabled)
   if (schedule_enabled) {
     int current_hr = timeinfo.tm_hour;
     int current_min = timeinfo.tm_min;
 
-    // Convert everything to minutes for easy comparison
+    // Normalize to minutes from midnight
     int now_mins = current_hr * 60 + current_min;
     int start_mins = start_hr * 60 + start_min;
     int end_mins = end_hr * 60 + end_min;
@@ -193,23 +218,24 @@ void checkSchedule() {
     bool should_be_on = false;
 
     if (start_mins < end_mins) {
-      // Normal day schedule (e.g. 08:00 to 17:00)
+      // Example: 08:00 to 17:00
       if (now_mins >= start_mins && now_mins < end_mins) {
         should_be_on = true;
       }
     } else if (start_mins > end_mins) {
-      // Overnight schedule (e.g. 22:00 to 06:00)
+      // Example: 22:00 to 06:00 (Overnight)
       if (now_mins >= start_mins || now_mins < end_mins) {
         should_be_on = true;
       }
     } else {
-      // Start == End? Assume OFF or Always ON? Let's assume OFF for safety if equal.
+      // Start == End. Assume OFF.
       should_be_on = false;
     }
 
-    // Apply State
+    // Apply only if changed
     if (relay_state != should_be_on) {
-      Serial.printf("Schedule Update: Switching %s\n", should_be_on ? "ON" : "OFF");
+      Serial.printf("Schedule Update: Switching %s (Time: %02d:%02d)\n",
+                    should_be_on ? "ON" : "OFF", current_hr, current_min);
       relay_state = should_be_on;
       digitalWrite(RELAY_PIN, relay_state ? HIGH : LOW);
       my_switch.updateAndReportParam(ESP_RMAKER_DEF_POWER_NAME, relay_state);
@@ -218,24 +244,49 @@ void checkSchedule() {
 }
 
 bool isTimeValid(struct tm *timeinfo) {
-  // If year is close to 1970, NTP hasn't worked.
+  // Check if year is valid (NTP synced)
   return (timeinfo->tm_year + 1900) > 2022;
 }
 
 void setupTime() {
-  // Configure Timezone.
-  // Note: RainMaker has its own TZ service, but we also manually set it here for the local logic
-  // "gmtOffset_sec" logic is simple, but we can update it from the param.
-  // Actually, we should apply the timezone offset from the param dynamically.
-  // For now, init with default.
+  // Configure time with offset
+  // daylightOffset is 0 because we handle it via simple slider offset if needed,
+  // or user adjusts the offset.
   configTime(timezone_offset * 3600, 0, ntpServer);
+}
+
+// -----------------------------------------------------------------------------
+// Logic: Factory Reset
+// -----------------------------------------------------------------------------
+void checkFactoryReset() {
+  if (digitalRead(BOOT_BUTTON_PIN) == LOW) {
+    unsigned long start_press = millis();
+    while (digitalRead(BOOT_BUTTON_PIN) == LOW) {
+      if (millis() - start_press > FACTORY_RESET_TIME_MS) {
+        Serial.println("\nFactory Reset Triggered!");
+        resetDevice();
+        break;
+      }
+      delay(100);
+    }
+  }
+}
+
+void resetDevice() {
+  Serial.println("Clearing NVS and resetting...");
+
+  // Clear Preferences
+  prefs.begin("compressor", false);
+  prefs.clear();
+  prefs.end();
+
+  // Factory Reset RainMaker (clears Wi-Fi and Node ID)
+  RMakerFactoryReset(2);
 }
 
 // -----------------------------------------------------------------------------
 // RainMaker Callbacks
 // -----------------------------------------------------------------------------
-
-// Callback for writing parameters from App
 void write_callback(Device *device, Param *param, const param_val_t val, void *priv_data, write_ctx_t *ctx) {
   const char *device_name = device->getDeviceName();
   const char *param_name = param->getParamName();
@@ -243,7 +294,6 @@ void write_callback(Device *device, Param *param, const param_val_t val, void *p
   Serial.printf("Received value = %s for %s - %s\n", val.val.b? "true" : "false", device_name, param_name);
 
   if (strcmp(param_name, ESP_RMAKER_DEF_POWER_NAME) == 0) {
-    // If user manually toggles power
     relay_state = val.val.b;
     digitalWrite(RELAY_PIN, relay_state ? HIGH : LOW);
     param->updateAndReport(val);
@@ -276,8 +326,7 @@ void write_callback(Device *device, Param *param, const param_val_t val, void *p
   else if (strcmp(param_name, "Timezone Offset") == 0) {
     timezone_offset = val.val.i;
     saveSetting("tz_offset", timezone_offset);
-    // Re-config time
-    configTime(timezone_offset * 3600, 0, ntpServer);
+    setupTime(); // Apply new time
     param->updateAndReport(val);
   }
 }
@@ -286,8 +335,7 @@ void write_callback(Device *device, Param *param, const param_val_t val, void *p
 // Persistence Helpers
 // -----------------------------------------------------------------------------
 void loadSettings() {
-  Preferences prefs;
-  prefs.begin("compressor", true); // Read-only mode
+  prefs.begin("compressor", true); // Read-only
 
   schedule_enabled = prefs.getBool("sched_en", schedule_enabled);
   start_hr = prefs.getInt("start_hr", start_hr);
@@ -297,25 +345,25 @@ void loadSettings() {
   timezone_offset = prefs.getInt("tz_offset", timezone_offset);
 
   prefs.end();
-  Serial.printf("Settings Loaded: Sched=%d, Start=%02d:%02d, End=%02d:%02d, TZ=%d\n",
-                schedule_enabled, start_hr, start_min, end_hr, end_min, timezone_offset);
+  Serial.printf("Settings Loaded: Sched=%s, Start=%02d:%02d, End=%02d:%02d, TZ=%d\n",
+                schedule_enabled ? "ON" : "OFF", start_hr, start_min, end_hr, end_min, timezone_offset);
 }
 
 void saveSetting(const char* key, int value) {
-  Preferences prefs;
-  prefs.begin("compressor", false); // Read-write mode
+  prefs.begin("compressor", false);
   prefs.putInt(key, value);
   prefs.end();
 }
 
 void saveSetting(const char* key, bool value) {
-  Preferences prefs;
-  prefs.begin("compressor", false); // Read-write mode
+  prefs.begin("compressor", false);
   prefs.putBool(key, value);
   prefs.end();
 }
 
-// Event handler for Provisioning and System events
+// -----------------------------------------------------------------------------
+// System Events
+// -----------------------------------------------------------------------------
 void sysProvEvent(arduino_event_t *sys_event) {
   switch (sys_event->event_id) {
     case ARDUINO_EVENT_PROV_START:
@@ -323,24 +371,24 @@ void sysProvEvent(arduino_event_t *sys_event) {
       Serial.printf("\nProvisioning Started with name \"%s\" and PoP \"%s\" on BLE\n",
                     (const char *)sys_event->event_info.prov_start.prov_name,
                     (const char *)sys_event->event_info.prov_start.prov_pop);
-      // printQR(sys_event->event_info.prov_start.prov_name, sys_event->event_info.prov_start.prov_pop, "ble");
 #else
       Serial.printf("\nProvisioning Started with name \"%s\" and PoP \"%s\" on SoftAP\n",
                     (const char *)sys_event->event_info.prov_start.prov_name,
                     (const char *)sys_event->event_info.prov_start.prov_pop);
-      // printQR(sys_event->event_info.prov_start.prov_name, sys_event->event_info.prov_start.prov_pop, "softap");
 #endif
       break;
     case ARDUINO_EVENT_WIFI_STA_CONNECTED:
-      Serial.printf("\nConnected to Wi-Fi!\n");
+      Serial.println("\nWi-Fi Connected.");
       break;
     case ARDUINO_EVENT_WIFI_STA_GOT_IP:
-      Serial.printf("Got IP: %s\n", WiFi.localIP().toString().c_str());
-      // Re-trigger time sync just in case
+      Serial.printf("Wi-Fi Got IP: %s\n", WiFi.localIP().toString().c_str());
       setupTime();
       break;
     case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
-      Serial.printf("\nDisconnected from Wi-Fi!\n");
+      Serial.println("\nWi-Fi Disconnected!");
+      // If disconnected, should we turn off safely?
+      // checkSchedule will fail to get time eventually if drift happens or reboot happens,
+      // but loop continues.
       break;
     default:;
   }
